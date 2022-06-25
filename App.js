@@ -1,5 +1,5 @@
 import { StatusBar } from "expo-status-bar";
-import React from "react";
+import { React, useRef, useState, useEffect } from "react";
 import {
   StyleSheet,
   Text,
@@ -8,15 +8,108 @@ import {
   Alert,
   ImageBackground,
   Image,
+  SafeAreaView,
+  LogBox,
 } from "react-native";
 import { Camera } from "expo-camera";
-let camera;
+import { cameraWithTensors } from "@tensorflow/tfjs-react-native";
+import * as handpose from "@tensorflow-models/handpose";
+import Canvas from "react-native-canvas";
+import * as tf from "@tensorflow/tfjs";
+import * as fp from "fingerpose";
+
+const TensorCamera = cameraWithTensors(Camera);
+// console.disableYellowBox = true;
+LogBox.ignoreWarnings = true;
 export default function App() {
-  const [startCamera, setStartCamera] = React.useState(false);
-  const [previewVisible, setPreviewVisible] = React.useState(false);
-  const [cameraType, setCameraType] = React.useState(
-    Camera.Constants.Type.front
-  );
+  let requestAnimationFrameId = 0;
+  const [tfReady, setTfReady] = useState(false);
+  const [hpmReady, setHpmReady] = useState(false);
+  const [startCamera, setStartCamera] = useState(false);
+  const [previewVisible, setPreviewVisible] = useState(false);
+  const [cameraType, setCameraType] = useState(Camera.Constants.Type.front);
+  const [handposeModel, setHandposeModel] = useState(null);
+  useEffect(() => {
+    return () => {
+      console.log("Cancelling animation frame: ", requestAnimationFrameId);
+      cancelAnimationFrame(requestAnimationFrameId);
+    };
+  }, [requestAnimationFrameId]);
+
+  const tensorcam = useRef(null);
+  function handleCameraStream(images, updatePreview, gl) {
+    const loop = async () => {
+      if (startCamera) {
+        const nextImageTensor = images.next().value;
+        console.log("imageAsTensors: ", JSON.stringify(nextImageTensor));
+        if (nextImageTensor) {
+          console.log("Calling estimateHands...");
+          handposeModel
+            .estimateHands(nextImageTensor)
+            .then((prediction) => {
+              console.log("prediction: ", JSON.stringify(prediction));
+              setEmoji(null);
+              if (prediction && prediction.length > 0) {
+                const GE = new fp.GestureEstimator([
+                  fp.Gestures.ThumbsUpGesture,
+                ]);
+                const gesture = GE.estimate(prediction[0].landmarks, 7.5);
+                console.log("Gesture: ", gesture);
+                if (
+                  gesture.gestures !== undefined &&
+                  gesture.gestures.length > 0
+                ) {
+                  const confidence = gesture.gestures.map(
+                    (prediction) => prediction.confidence
+                  );
+                  const mxConfidence = confidence.indexOf(
+                    Math.max.apply(null, confidence)
+                  );
+                  const emojiName = gesture.gestures[mxConfidence].name;
+                  console.log("emoji name: ", emojiName);
+                  setEmoji(emojiName);
+                }
+              }
+              console.log("Looping...");
+              requestAnimationFrameId = requestAnimationFrame(loop);
+            })
+            .catch((e1) => {
+              console.error("Prediction error", e1.message, e1.stack);
+            });
+        }
+      }
+    };
+    loop();
+  }
+  const runHandpose = async () => {
+    console.log("Initializing...");
+    tf.ready()
+      .then(() => {
+        console.log(tf.getBackend());
+        setTfReady(true);
+
+        handpose
+          .load()
+          .then((model) => {
+            console.log("hand pose model: ", model);
+            setHandposeModel(model);
+            setHpmReady(true);
+
+            console.log("Tf and handpose model initialized");
+          })
+          .catch((e2) => {
+            console.error("Hand pose model load error", e2.message, e2.stack);
+          });
+      })
+      .catch((e1) => {
+        console.error("TF init error", e1.message, e1.stack);
+      });
+    //  Loop and detect hands
+    // setInterval(() => {
+    //   detect(net);
+    // }, 100);
+  };
+  runHandpose();
 
   const __startCamera = async () => {
     const { status } = await Camera.requestCameraPermissionsAsync();
@@ -34,74 +127,61 @@ export default function App() {
       setCameraType("back");
     }
   };
+  const handleCanvas = (canvas) => {
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "purple";
+    ctx.fillRect(0, 0, 100, 100);
+  };
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container}>
       {startCamera ? (
         <View
           style={{
-            flex: 1,
             width: "100%",
+            height: "100%",
+            flex: 1,
           }}
         >
-          {previewVisible && capturedImage ? (
-            <CameraPreview photo={capturedImage} />
-          ) : (
-            <Camera
+          {hpmReady && tfReady ? (
+            <TensorCamera
+              ref={tensorcam}
+              // Standard Camera props
+              style={styles.camera}
               type={cameraType}
-              style={{ flex: 1 }}
-              ref={(r) => {
-                camera = r;
+              onReady={handleCameraStream}
+              autorender={true}
+              isImageMirror={true}
+            ></TensorCamera>
+          ) : (
+            <Text style={{ top: 200 }}>{"Initializing..."}</Text>
+          )}
+          <Canvas style={styles.canvas} />
+          <View
+            style={{
+              position: "absolute",
+              zIndex: 10,
+              left: "5%",
+              top: "10%",
+            }}
+          >
+            <TouchableOpacity
+              onPress={__switchCamera}
+              style={{
+                marginTop: 20,
+                borderRadius: "50%",
+                height: 25,
+                width: 25,
               }}
             >
-              <View
+              <Text
                 style={{
-                  flex: 1,
-                  width: "100%",
-                  backgroundColor: "transparent",
-                  flexDirection: "row",
+                  fontSize: 20,
                 }}
               >
-                <View
-                  style={{
-                    position: "absolute",
-                    left: "5%",
-                    top: "10%",
-                    flexDirection: "column",
-                    justifyContent: "space-between",
-                  }}
-                >
-                  <TouchableOpacity
-                    onPress={__switchCamera}
-                    style={{
-                      marginTop: 20,
-                      borderRadius: "50%",
-                      height: 25,
-                      width: 25,
-                    }}
-                  >
-                    <Text
-                      style={{
-                        fontSize: 20,
-                      }}
-                    >
-                      {cameraType === "front" ? "🤳" : "📷"}
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-                <View
-                  style={{
-                    position: "absolute",
-                    bottom: 0,
-                    flexDirection: "row",
-                    flex: 1,
-                    width: "100%",
-                    padding: 20,
-                    justifyContent: "space-between",
-                  }}
-                ></View>
-              </View>
-            </Camera>
-          )}
+                {cameraType !== "back" ? "📷" : "🤳"}
+              </Text>
+            </TouchableOpacity>
+          </View>
         </View>
       ) : (
         <View
@@ -136,9 +216,7 @@ export default function App() {
           </TouchableOpacity>
         </View>
       )}
-
-      <StatusBar style="auto" />
-    </View>
+    </SafeAreaView>
   );
 }
 
@@ -148,6 +226,28 @@ const styles = StyleSheet.create({
     backgroundColor: "#fff",
     alignItems: "center",
     justifyContent: "center",
+  },
+  camera: {
+    position: "absolute",
+    marginLeft: "auto",
+    marginRight: "auto",
+    left: 0,
+    right: 0,
+    textAlign: "center",
+    zindex: 9,
+    width: 480,
+    height: 640,
+  },
+  canvas: {
+    position: "absolute",
+    marginLeft: "auto",
+    marginRight: "auto",
+    left: 0,
+    right: 0,
+    textAlign: "center",
+    zindex: 10,
+    width: 480,
+    height: 640,
   },
 });
 
